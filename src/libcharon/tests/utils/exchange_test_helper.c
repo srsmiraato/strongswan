@@ -94,15 +94,12 @@ static ike_cfg_t *create_ike_cfg(bool initiator, exchange_test_sa_conf_t *conf)
 	{
 		proposal = initiator ? conf->initiator.ike : conf->responder.ike;
 	}
-	if (proposal)
+	if (!proposal)
 	{
-		ike_cfg->add_proposal(ike_cfg,
-							proposal_create_from_string(PROTO_IKE, proposal));
+		proposal = "aes256-sha256-ecp384";
 	}
-	else
-	{
-		ike_cfg->add_proposal(ike_cfg, proposal_create_default(PROTO_IKE));
-	}
+	ike_cfg->add_proposal(ike_cfg,
+						  proposal_create_from_string(PROTO_IKE, proposal));
 	return ike_cfg;
 }
 
@@ -306,6 +303,7 @@ void exchange_test_helper_init(char *plugins)
 			PLUGIN_PROVIDE(DH, MODP_2048_BIT),
 			PLUGIN_PROVIDE(DH, MODP_3072_BIT),
 			PLUGIN_PROVIDE(DH, ECP_256_BIT),
+			PLUGIN_PROVIDE(DH, ECP_384_BIT),
 		PLUGIN_REGISTER(NONCE_GEN, create_nonce_gen),
 			PLUGIN_PROVIDE(NONCE_GEN),
 				PLUGIN_DEPENDS(RNG, RNG_WEAK),
