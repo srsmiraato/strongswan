@@ -208,6 +208,7 @@ METHOD(child_cfg_t, get_proposals, linked_list_t*,
 		if (strip_dh)
 		{
 			current->strip_transform(current, DIFFIE_HELLMAN_GROUP, MODP_NONE);
+			current->strip_transform(current, QSKE_MECHANISM, QSKE_NONE);
 		}
 		if (proposals->find_first(proposals, match_proposal, NULL, current))
 		{
@@ -247,6 +248,7 @@ METHOD(child_cfg_t, select_proposal, proposal_t*,
 		if (strip_dh)
 		{
 			proposal->strip_transform(proposal, DIFFIE_HELLMAN_GROUP, MODP_NONE);
+			proposal->strip_transform(proposal, QSKE_MECHANISM, QSKE_NONE);
 		}
 		if (prefer_self)
 		{
@@ -262,6 +264,7 @@ METHOD(child_cfg_t, select_proposal, proposal_t*,
 			if (strip_dh)
 			{
 				match->strip_transform(match, DIFFIE_HELLMAN_GROUP, MODP_NONE);
+				match->strip_transform(match, QSKE_MECHANISM, QSKE_NONE);
 			}
 			selected = proposal->select(proposal, match, prefer_self, private);
 			match->destroy(match);
