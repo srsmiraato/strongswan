@@ -80,9 +80,14 @@ struct private_child_create_t {
 	linked_list_t *proposals;
 
 	/**
-	 * selected proposal to use for CHILD_SA
+	 * Selected proposal to use for CHILD_SA
 	 */
 	proposal_t *proposal;
+
+	/**
+	 * Proposal used previously during a rekeying
+	 */
+	proposal_t *old_proposal;
 
 	/**
 	 * traffic selectors for initiators side
@@ -1128,6 +1133,80 @@ static void process_payloads(private_child_create_t *this, message_t *message)
 	enumerator->destroy(enumerator);
 }
 
+/**
+ * Assign algorithms from the given proposal, if we find them in our config.
+ *
+ * Returns TRUE if algorithms were found and assigned.
+ */
+static bool assign_pfs_algorithms(private_child_create_t *this,
+								  proposal_t *proposal, char *origin)
+{
+	child_cfg_t *child_cfg = this->config;
+	uint16_t dh = 0, qske = 0;
+
+	if (proposal->get_algorithm(proposal, DIFFIE_HELLMAN_GROUP, &dh, NULL) ||
+		proposal->get_algorithm(proposal, QSKE_MECHANISM, &qske, NULL))
+	{
+		if (dh && this->dh_group != dh &&
+			child_cfg->has_transform(child_cfg, DIFFIE_HELLMAN_GROUP, dh))
+		{
+			DBG2(DBG_CFG, "prefer %s DH group %N to first in proposals %N",
+				 origin, diffie_hellman_group_names, dh,
+				 diffie_hellman_group_names, this->dh_group);
+			this->dh_group = dh;
+		}
+		if (qske && this->qske_mechanism != qske &&
+			child_cfg->has_transform(child_cfg, QSKE_MECHANISM, qske))
+		{
+			DBG2(DBG_CFG, "prefer %s QSKE mechanism %N to first in proposals "
+				 "%N", origin, qske_mechanism_names, qske, qske_mechanism_names,
+				 this->qske_mechanism);
+			this->qske_mechanism = qske;
+		}
+		return TRUE;
+	}
+	return FALSE;
+}
+
+/**
+ * Determine DH group/QSKE mechanism to use as initiator
+ */
+static void determine_pfs_algorithms(private_child_create_t *this)
+{
+	child_cfg_t *child_cfg = this->config;
+
+	/* determine default algorithms and whether we actually propose PFS */
+	this->dh_group = child_cfg->get_algorithm(child_cfg, DIFFIE_HELLMAN_GROUP);
+	this->qske_mechanism = child_cfg->get_algorithm(child_cfg, QSKE_MECHANISM);
+	if (this->dh_group == MODP_NONE && this->qske_mechanism == QSKE_NONE)
+	{
+		return;
+	}
+
+	/* reuse previous algorithms when rekeying, unless this is the first
+	 * rekeying, which we assume is the case if the previous proposal contains
+	 * no DH/QSKE algorithms (this could also be the case if we have proposals
+	 * without PFS configured and the peer selected one of them) */
+	if (this->rekey && this->old_proposal &&
+		lib->settings->get_bool(lib->settings,
+								"%s.prefer_previous_dh_group", TRUE, lib->ns))
+	{
+		if (assign_pfs_algorithms(this, this->old_proposal, "previously used"))
+		{
+			return;
+		}
+	}
+
+	/* turn to the IKE_SA's proposal for pointers if we have no previous
+	 * CHILD_SA proposal or it wasn't a PFS proposal */
+	if (lib->settings->get_bool(lib->settings,
+							"%s.prefer_ike_dh_group", TRUE, lib->ns))
+	{
+		assign_pfs_algorithms(this, this->ike_sa->get_proposal(this->ike_sa),
+							  "IKE_SA's");
+	}
+}
+
 METHOD(task_t, build_i, status_t,
 	private_child_create_t *this, message_t *message)
 {
@@ -1202,6 +1281,11 @@ METHOD(task_t, build_i, status_t,
 	this->proposals = this->config->get_proposals(this->config, no_dh);
 	this->mode = this->config->get_mode(this->config);
 
+	if (!no_dh && !this->retry)
+	{
+		determine_pfs_algorithms(this);
+	}
+
 	this->child_sa = child_sa_create(this->ike_sa->get_my_host(this->ike_sa),
 			this->ike_sa->get_other_host(this->ike_sa), this->config, this->reqid,
 			this->ike_sa->has_condition(this->ike_sa, COND_NAT_ANY),
@@ -1224,23 +1308,6 @@ METHOD(task_t, build_i, status_t,
 	{
 		DBG1(DBG_IKE, "unable to allocate SPIs from kernel");
 		return FAILED;
-	}
-
-	/* FIXME: get a group/mechanism from the IKE_SA if we are not rekeying */
-
-	/* during a rekeying the group might already be set */
-	if (!no_dh && !this->retry)
-	{
-		if (this->dh_group == MODP_NONE)
-		{
-			this->dh_group = this->config->get_algorithm(this->config,
-														 DIFFIE_HELLMAN_GROUP);
-		}
-		if (this->qske_mechanism == QSKE_NONE)
-		{
-			this->qske_mechanism = this->config->get_algorithm(this->config,
-															   QSKE_MECHANISM);
-		}
 	}
 
 	if (this->dh_group != MODP_NONE)
@@ -2009,10 +2076,11 @@ METHOD(child_create_t, use_marks, void,
 	this->mark_out = out;
 }
 
-METHOD(child_create_t, use_dh_group, void,
-	private_child_create_t *this, diffie_hellman_group_t dh_group)
+METHOD(child_create_t, use_proposal, void,
+	private_child_create_t *this, proposal_t *proposal)
 {
-	this->dh_group = dh_group;
+	DESTROY_IF(this->proposal);
+	this->old_proposal = proposal->clone(proposal);
 }
 
 METHOD(child_create_t, get_child, child_sa_t*,
@@ -2112,6 +2180,7 @@ METHOD(task_t, destroy, void,
 	}
 	DESTROY_IF(this->packet_tsi);
 	DESTROY_IF(this->packet_tsr);
+	DESTROY_IF(this->old_proposal);
 	DESTROY_IF(this->proposal);
 	DESTROY_IF(this->qske);
 	DESTROY_IF(this->dh);
@@ -2140,7 +2209,7 @@ child_create_t *child_create_create(ike_sa_t *ike_sa,
 			.get_lower_nonce = _get_lower_nonce,
 			.use_reqid = _use_reqid,
 			.use_marks = _use_marks,
-			.use_dh_group = _use_dh_group,
+			.use_proposal = _use_proposal,
 			.task = {
 				.get_type = _get_type,
 				.migrate = _migrate,
